@@ -1,0 +1,129 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>単一ファイルPWA通知</title>
+    
+    <link rel="manifest" href="data:application/manifest+json,{%22name%22:%22単一ファイルPWA%22,%22short_name%22:%22単一PWA%22,%22start_url%22:%22.%22,%22display%22:%22standalone%22,%22background_color%22:%22%23ffffff%22,%22theme_color%22:%22%23000000%22,%22icons%22:[{%22src%22:%22data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='512' height='512' viewBox='0 0 512 512'><rect width='512' height='512' fill='%23007AFF'/><text x='50%%27 y='55%%27 font-family='sans-serif' font-size='200' fill='white' text-anchor='middle' dominant-baseline='middle'>🔔</text></svg>%22,%22sizes%22:%22512x512%22,%22type%22:%22image/svg+xml%22}]}">
+    
+    <style>
+        body { font-family: -apple-system, sans-serif; padding: 30px; text-align: center; background: #f5f5f7; color: #333; }
+        .card { background: white; padding: 20px; border-radius: 12px; box-shadow: 0 4px 6px rgba(0,0,0,0.05); max-width: 400px; margin: 20px auto; }
+        textarea, input, button { display: block; width: 100%; box-sizing: border-box; margin: 15px 0; padding: 12px; border-radius: 8px; border: 1px solid #ccc; font-size: 16px; }
+        button { background: #007aff; color: white; border: none; font-weight: bold; cursor: pointer; }
+        button:disabled { background: #b0b0b0; }
+        .log { font-size: 12px; color: #666; background: #eee; padding: 10px; border-radius: 6px; text-align: left; white-space: pre-wrap; max-height: 100px; overflow-y: auto; }
+    </style>
+</head>
+<body>
+
+    <div class="card">
+        <h2>PWA通知テスト（単一ファイル版）</h2>
+        <p style="font-size: 14px; color: #666;">※iOSで動かすには、Safariの共有メニューから「ホーム画面に追加」して起動してください。</p>
+        
+        <button id="auth-btn">1. 通知の権限を許可する</button>
+        <textarea id="msg-input" placeholder="通知させたい文章を入力してください">時間になりました！設定されたメッセージです。</textarea>
+        <input type="number" id="time-input" placeholder="何秒後に通知するか（秒）" value="5" min="1">
+        <button id="notify-btn" disabled>2. 通知を予約する</button>
+        
+        <div class="log" id="log-box">ログ: 起動完了</div>
+    </div>
+
+    <script>
+        // --- ログ出力用関数 ---
+        function logger(text) {
+            document.getElementById('log-box').innerText += '\n' + text;
+        }
+
+        // ==========================================
+        // 裏技：サービスワーカーのコードを文字列で定義し、擬似ファイル化する
+        // ==========================================
+        const swCode = `
+            self.addEventListener('install', (e) => self.skipWaiting());
+            self.addEventListener('activate', (e) => e.waitUntil(self.clients.claim()));
+            
+            // サーバー代わりの擬似プッシュイベント、またはメッセージイベントの待受
+            self.addEventListener('message', (event) => {
+                if (event.data && event.data.action === 'schedule_notification') {
+                    const { message, delayMs } = event.data;
+                    
+                    // 指定秒数後に通知を強制発火
+                    setTimeout(() => {
+                        self.registration.showNotification('PWAタイマー通知', {
+                            body: message,
+                            badge: 'data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10" fill="black"/></svg>'
+                        });
+                    }, delayMs);
+                }
+            });
+        `;
+
+        // 文字列から「仮想的な独立JSファイル」のURLを生成する
+        const blob = new Blob([swCode], { type: 'application/javascript' });
+        const swUrl = URL.createObjectURL(blob);
+
+        let swRegistration = null;
+
+        // 擬似サービスワーカーの登録
+        if ('serviceWorker' in navigator) {
+            navigator.serviceWorker.register(swUrl, { scope: './' })
+                .then(reg => {
+                    swRegistration = reg;
+                    logger('サービスワーカー登録成功（Blob経由）');
+                })
+                .catch(err => logger('SW登録失敗: ' + err));
+        } else {
+            logger('このブラウザはServiceWorker非対応です');
+        }
+
+        // --- 1. 通知権限の要求 ---
+        document.getElementById('auth-btn').addEventListener('click', async () => {
+            if (!('Notification' in window)) {
+                alert('このブラウザは通知に対応していません');
+                return;
+            }
+            
+            const permission = await Notification.requestPermission();
+            logger('通知権限ステータス: ' + permission);
+            
+            if (permission === 'granted') {
+                document.getElementById('notify-btn').disabled = false;
+                alert('通知が許可されました！');
+            } else {
+                alert('通知が拒否されました。設定アプリ等からブラウザの通知をオンにしてください。');
+            }
+        });
+
+        // --- 2. 通知の予約（擬似バックグラウンド処理） ---
+        document.getElementById('notify-btn').addEventListener('click', () => {
+            const message = document.getElementById('msg-input').value;
+            const seconds = parseInt(document.getElementById('time-input').value) || 5;
+            
+            if (!swRegistration) {
+                alert('サービスワーカーの準備ができていません');
+                return;
+            }
+
+            logger(`${seconds}秒後に通知を予約しました。アプリを閉じてお待ちください。`);
+
+            // アクティブなサービスワーカーに、通知のタスク（文章とミリ秒）を送信
+            const controller = navigator.serviceWorker.controller;
+            if (controller) {
+                controller.postMessage({
+                    action: 'schedule_notification',
+                    message: message,
+                    delayMs: seconds * 1000
+                });
+            } else {
+                // 初回起動時などでcontrollerが未確定な場合のフォールバック
+                swRegistration.active.postMessage({
+                    action: 'schedule_notification',
+                    message: message,
+                    delayMs: seconds * 1000
+                });
+            }
+        });
+    </script>
+</body>
+</html>
